@@ -2,881 +2,791 @@
 #define SJTU_DEQUE_HPP
 
 #include "exceptions.hpp"
-
+#include "utility.hpp"
 #include <cstddef>
 #include <cmath>
-namespace sjtu { 
+#include <cstdio>
 
-    template<class T>
-    class deque {
-        private:
-            int sumsize,blksize;
-            struct node
+namespace sjtu
+{
+    // NOTE: list + list
+    //  deque = list<Block>
+    //  Block = list<Node>
+    template <class T>
+    class deque
+    {
+    private:
+        int total_size, blk_size;
+        const int min_blk = 500;
+
+        enum NodeType
+        {
+            Virtual, // guard node
+            Data
+        };
+
+        struct Node
+        {
+            const NodeType node_type;
+            Node *prev, *succ;
+            T *storage;
+
+            Node() : node_type(NodeType::Virtual),
+                     prev(nullptr), succ(nullptr),
+                     storage(nullptr) {}
+
+            Node(const T &data)
+                : node_type(NodeType::Data),
+                  prev(nullptr), succ(nullptr)
             {
-                T val;
-                node *pre,*nxt;
-                node(const T &_val):val(_val)
-                {
-                    pre=nxt=NULL;
-                }
-                node(const T &_val,node *_pre,node *_nxt):val(_val),pre(_pre),nxt(_nxt){}
-            };
-            struct root
+                storage = new T(data);
+            }
+
+            Node(const T &data, Node *prev, Node *succ)
+                : node_type(NodeType::Data),
+                  prev(prev), succ(succ)
             {
-                int size;
-                node *Head,*Tail;
-                root *pre,*nxt;
-                root()
+                storage = new T(data);
+            }
+
+            ~Node()
+            {
+                delete storage;
+            }
+        };
+
+        struct Block
+        {
+            const NodeType block_type;
+
+            int n_node;
+            Node *head, *tail;
+            Block *prev, *succ;
+
+            Block() : block_type(NodeType::Virtual)
+            {
+                n_node = 0;
+                head = new Node();
+                tail = new Node();
+                head->succ = tail;
+                tail->prev = head;
+                prev = succ = nullptr;
+            }
+
+            Block(Block *prev, Block *succ)
+                : block_type(NodeType::Data)
+            {
+                n_node = 0;
+                head = new Node();
+                tail = new Node();
+                head->succ = tail;
+                tail->prev = head;
+
+                this->prev = prev;
+                this->succ = succ;
+            }
+
+            Block(const Block &other)
+                : block_type(NodeType::Data)
+            {
+                if (other.block_type == NodeType::Virtual)
+                    throw index_out_of_bound();
+
+                n_node = other.n_node;
+                head = new Node();
+                tail = new Node();
+                head->succ = tail;
+                tail->prev = head;
+                prev = succ = nullptr;
+
+                Node *current = head;
+                for (Node *t = other.head->succ; t != other.tail; t = t->succ)
                 {
-                    size=0;
-                    Head=Tail=NULL;
-                    pre=nxt=NULL;
+                    Node *x = new Node(*(t->storage));
+                    current->succ->prev = x;
+                    x->succ = current->succ;
+                    x->prev = current;
+                    current->succ = x;
+
+                    current = x;
                 }
-                root(const int &_size):size(_size)
+            }
+
+            ~Block()
+            {
+                Node *x = head;
+                do
                 {
-                    Head=Tail=NULL;
-                    pre=nxt=NULL;
-                }
-                root(const int &_size,root *_pre,root *_nxt):size(_size),pre(_pre),nxt(_nxt)
+                    Node *succ = x->succ;
+                    delete x;
+                    x = succ;
+                } while (x != nullptr);
+            }
+
+            void merge(int blk_size)
+            {
+                if (n_node == 0)
                 {
-                    Head=Tail=NULL;
-                }
-                void merge(const int &blksize)
-                {
-                    root *L=pre,*R=nxt;
-                    if (size==0)
-                    {
-                        L->nxt=R,R->pre=L;
-                        delete this;
-                        return;
-                    }
-                    if (L->size>0&&L->size+size<1.2*blksize)
-                    {
-                        L->Tail->nxt=Head;
-                        Head->pre=L->Tail;
-                        L->size+=size;
-                        L->Tail=Tail;
-                        L->nxt=R,R->pre=L;
-                        delete this;
-                        return;
-                    }
-                    if (R->size>0&&R->size+size<1.2*blksize)
-                    {
-                        R->Head->pre=Tail;
-                        Tail->nxt=R->Head;
-                        R->size+=size;
-                        R->Head=Head;
-                        L->nxt=R,R->pre=L;
-                        delete this;
-                        return;
-                    }
-                }
-                void split(const int &blksize)
-                {
-                    if (size<2*blksize) return;
-                    root *ls=new root(blksize,pre,NULL);
-                    root *rs=new root(size-blksize,ls,nxt);
-                    ls->nxt=rs;
-                    pre->nxt=ls,nxt->pre=rs;
-                    node *o=Head;
-                    for(int i=blksize;i;--i) o=o->nxt;
-                    ls->Head=Head;
-                    ls->Tail=o->pre,o->pre->nxt=NULL;
-                    rs->Tail=Tail;
-                    rs->Head=o,o->pre=NULL;
+                    prev->succ = succ;
+                    succ->prev = prev;
                     delete this;
+                    return;
                 }
-                void push_back(const T &value,const int &blksize)
-                {
-                    if (size==0)
-                        Head=Tail=new node(value);
-                    else
-                    {
-                        Tail->nxt=new node(value,Tail,NULL);
-                        Tail=Tail->nxt;
-                    }
-                    size++,split(blksize);
-                }
-                void pop_back(const int &blksize)
-                {
-                    
-                    node *tmp=Tail;
-                    if (Head==Tail)
-                        Head=Tail=NULL;
-                    else
-                    {
-                        Tail=Tail->pre;
-                        Tail->nxt=NULL;
-                    }
-                    delete tmp;
-                    size--,merge(blksize);
-                }
-                void push_front(const T &value,const int &blksize)
-                {
-                    if (size==0)
-                        Head=Tail=new node(value);
-                    else
-                    {
-                        Head->pre=new node(value,NULL,Head);
-                        Head=Head->pre;
-                    }
-                    size++,split(blksize);
-                }
-                void pop_front(const int &blksize)
-                {   
-                    node *tmp=Head;
-                    if (Head==Tail)
-                        Head=Tail=NULL;
-                    else
-                    {
-                        Head=Head->nxt;
-                        Head->pre=NULL;
-                    }
-                    delete tmp;
-                    size--,merge(blksize);    
-                }
-            };
-            root *Head,*Tail;
-            template<class Tnode>
-            Tnode* del(Tnode *o)
-            {
-                Tnode *L=o->pre,*R=o->nxt;
-                if (L!=NULL) L->nxt=R;
-                if (R!=NULL) R->pre=L;
-                delete o;
-                return R;
+
+                if (prev->block_type == NodeType::Data &&
+                    prev->n_node + n_node <= blk_size)
+                    merge(prev, this);
+                else if (succ->block_type == NodeType::Data &&
+                         succ->n_node + n_node <= blk_size)
+                    merge(this, succ);
             }
+
+            // merge and delete succ
+            static void merge(Block *prev, Block *succ)
+            {
+                // merge node
+                prev->tail->prev->succ = succ->head->succ;
+                succ->head->succ->prev = prev->tail->prev;
+                succ->tail->prev->succ = prev->tail;
+                prev->tail->prev = succ->tail->prev;
+                prev->n_node += succ->n_node;
+
+                // merge block
+                prev->succ = succ->succ;
+                succ->succ->prev = prev;
+
+                succ->head->succ = succ->tail;
+                delete succ;
+            }
+
+            Node *at(int k)
+            {
+                // [0, n_node]
+                if (k > n_node)
+                    throw index_out_of_bound();
+                Node *x = head->succ;
+                while (k--)
+                    x = x->succ;
+                return x;
+            }
+
+            static void split(Block *block, int blk_size)
+            {
+                if (block->n_node < 2 * blk_size)
+                    return;
+
+                Block *prev = new Block(block->prev, nullptr);
+                block->prev->succ = prev;
+                block->head->succ->prev = prev->head;
+                prev->head->succ = block->head->succ;
+                prev->n_node = blk_size;
+
+                Block *succ = new Block(prev, block->succ);
+                block->succ->prev = succ;
+                succ->n_node = block->n_node - blk_size;
+                block->tail->prev->succ = succ->tail;
+                succ->tail->prev = block->tail->prev;
+                prev->succ = succ;
+
+                Node *x = block->at(blk_size - 1);
+                succ->head->succ = x->succ;
+                x->succ->prev = succ->head;
+                succ->tail->prev = block->tail->prev;
+
+                prev->head->succ = block->head->succ;
+                prev->tail->prev = x;
+                x->succ = prev->tail;
+
+                block->head->succ = block->tail;
+                delete block;
+            }
+
+            /**
+             * insert before k
+             */
+            void insert(int k, const T &value, int blk_size)
+            {
+                insert(this->at(k), value, blk_size);
+            }
+
+            void insert(Node *x, const T &value, int blk_size)
+            {
+                Node *new_node = new Node(value, x->prev, x);
+
+                x->prev->succ = new_node;
+                x->prev = new_node;
+
+                n_node++;
+                split(this, blk_size);
+            }
+
+            void remove(int k, int blk_size)
+            {
+                remove(this->at(k), blk_size);
+            }
+
+            void remove(Node *x, int blk_size)
+            {
+                x->succ->prev = x->prev;
+                x->prev->succ = x->succ;
+                delete x;
+
+                n_node--;
+                merge(blk_size);
+            }
+        };
+        Block *head, *tail;
+
+        pair<Block *, Node *> find(int k) const
+        {
+            if (k > total_size)
+                throw index_out_of_bound();
+
+            Block *block = head->succ;
+            while (block->n_node <= k)
+            {
+                k -= block->n_node;
+                block = block->succ;
+            }
+            return pair<Block *, Node *>(block, block->at(k));
+        }
+
+    public:
+        // debug function
+        void display()
+        {
+            printf("[INFO]: display\n");
+            for (Block *block = head->succ; block != tail; block = block->succ)
+                for (Node *x = block->head->succ; x != block->tail; x = x->succ)
+                    printf("%d ", *(x->storage));
+            printf("\n");
+            for (Block *block = tail->prev; block != head; block = block->prev)
+                for (Node *x = block->tail->prev; x != block->head; x = x->prev)
+                    printf("%d ", *(x->storage));
+            printf("\n");
+        }
+
+    public:
+        class const_iterator;
+        class iterator
+        {
+            friend class deque<T>;
+
+        private:
+            deque<T> *deque_ptr;
+            int index;
+
+            /**
+             * TODO add data members
+             *   just add whatever you want.
+             */
         public:
-            class const_iterator;
-            class iterator {
-                friend class deque<T>;
-                private:
-                    deque<T> *ptr;
-                    root *now_rt;
-                    node *now;
-                    int K_th(const int &sumsize) const
-                    {
-                        if (now_rt==ptr->Tail) return sumsize+1;
-                        int ret=0;
-                        root *x=ptr->Head->nxt;
-                        while (x!=now_rt)
-                        {
-                            ret+=x->size;
-                            x=x->nxt;
-                        }
-                        node *o=x->Head;
-                        while (o!=now)
-                        {
-                            ret++;
-                            o=o->nxt;
-                        }
-                        return ++ret;
-                    }
-                    /**
-                     * TODO add data members
-                     *   just add whatever you want.
-                     */
-                public:
-                    iterator(){}
-                    iterator(deque<T> *_ptr,int K):ptr(_ptr)
-                    {
-                        now_rt=_ptr->Head->nxt; 
-                        while (now_rt!=_ptr->Tail&&K>now_rt->size)
-                        {
-                            K-=now_rt->size;
-                            now_rt=now_rt->nxt;
-                        }
-                        if (now_rt==_ptr->Tail) return;
-                        now=now_rt->Head,K--;
-                        while (K--) now=now->nxt;
-                    }
-                    iterator(deque<T> *_ptr,root *_now_rt=NULL,node *_now=NULL):ptr(_ptr),now_rt(_now_rt),now(_now){}
-                    iterator(const iterator &other)
-                    {
-                        ptr=other.ptr;
-                        now_rt=other.now_rt;
-                        now=other.now;
-                    }
-                    /**
-                     * return a new iterator which pointer n-next elements
-                     *   even if there are not enough elements, the behaviour is **undefined**.
-                     * as well as operator-
-                     */
-                    iterator operator+(const int &n) const 
-                    { 
-                        if (now_rt==ptr->Tail&&n>0)
-                            throw invalid_iterator();
-                        if (n<0) return this->operator-(-n);
-                        int K=n;
-                        iterator ret(ptr,now_rt,now);
-                        while (ret.now!=ret.now_rt->Tail&&K--) ret.now=ret.now->nxt;
-                        if (K<=0) return ret;
-                        ret.now_rt=ret.now_rt->nxt;
-                        while (ret.now_rt!=ret.ptr->Tail&&K>ret.now_rt->size) 
-                            K-=ret.now_rt->size,ret.now_rt=ret.now_rt->nxt;
-                        if (ret.now_rt==ret.ptr->Tail) return ret;
-                        ret.now=ret.now_rt->Head,K--;
-                        while (K--) ret.now=ret.now->nxt;
-                        return ret; 
-                    }
-                    iterator operator-(const int &n) const 
-                    {
-                        if (n<0) return this->operator+(-n);
-                        int K=n;
-                        iterator ret(ptr,now_rt,now);
-                        if (ret.now_rt!=ret.ptr->Tail)
-                            while (ret.now!=ret.now_rt->Head&&K--) ret.now=ret.now->pre;
-                        if (K<=0) return ret;
-                        ret.now_rt=ret.now_rt->pre;
-                        while (ret.now_rt!=ret.ptr->Head&&K>ret.now_rt->size) 
-                            K-=ret.now_rt->size,ret.now_rt=ret.now_rt->pre;
-                        if (ret.now_rt==ret.ptr->Head) 
-                            throw invalid_iterator();
-                        ret.now=ret.now_rt->Tail,K--;
-                        while (K--) ret.now=ret.now->pre;
-                        return ret; 
-                    }
-                    // return th distance between two iterator,
-                    // if these two iterators points to different vectors, throw invaild_iterator.
-                    int operator-(const iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr)
-                            throw invalid_iterator();
-                        return K_th(ptr->sumsize)-rhs.K_th(ptr->sumsize);
-                        
-                    }
-                    iterator& operator+=(const int &n) 
-                    {
-                        if (now_rt==ptr->Tail&&n>0)
-                            throw invalid_iterator();
-                        if (n<0) return this->operator-=(-n);
-                        int K=n;
-                        while (now!=now_rt->Tail&&K--) now=now->nxt;
-                        if (K<=0) return *this;
-                        now_rt=now_rt->nxt;
-                        while (now_rt!=ptr->Tail&&K>now_rt->size) 
-                            K-=now_rt->size,now_rt=now_rt->nxt;
-                        if (now_rt==ptr->Tail) return *this;
-                        now=now_rt->Head,K--;
-                        while (K--) now=now->nxt;
-                        return *this; 
-                    }
-                    iterator& operator-=(const int &n) 
-                    {
-                        if (n<0) return this->operator+=(-n);
-                        int K=n;
-                        if (now_rt!=ptr->Tail)
-                            while (now!=now_rt->Head&&K--) now=now->pre;
-                        if (K<=0) return *this;
-                        now_rt=now_rt->pre;
-                        while (now_rt!=ptr->Head&&K>now_rt->size) 
-                            K-=now_rt->size,now_rt=now_rt->pre;
-                        if (now_rt==ptr->Head) 
-                            throw invalid_iterator();
-                        now=now_rt->Tail,K--;
-                        while (K--) now=now->pre;
-                        return *this; 
-                    }
-                    /**
-                     * TODO iter++
-                     */
-                    iterator operator++(int) 
-                    {
-                        iterator tmp(*this);
-                        this->operator+=(1);
-                        return tmp;
-                    }
-                    /**
-                     * TODO ++iter
-                     */
-                    iterator& operator++() 
-                    {
-                        this->operator+=(1);
-                        return *this;
-                    }
-                    /**
-                     * TODO iter--
-                     */
-                    iterator operator--(int) 
-                    {
-                        iterator tmp(*this);
-                        this->operator-=(1);
-                        return tmp;
-                    }
-                    /**
-                     * TODO --iter
-                     */
-                    iterator& operator--() 
-                    {
-                        this->operator-=(1);
-                        return *this;
-                    }
-                    /**
-                     * TODO *it
-                     */
-                    T& operator*() const 
-                    {
-                        if (now_rt==ptr->Tail) 
-                            throw invalid_iterator();
-                        return now->val;
-                    }
-                    /**
-                     * TODO it->field
-                     */
-                    T* operator->() const noexcept 
-                    {
-                        return &(this->now->val);
-                    }
-                    /**
-                     * a operator to check whether two iterators are same (pointing to the same memory).
-                     */
-                    bool operator==(const iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 0;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 1;
-                        return now==rhs.now;
-                    }
-                    bool operator==(const const_iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 0;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 1;
-                        return now==rhs.now;
-                    }
-                    /**
-                     * some other operator for iterator.
-                     */
-                    bool operator!=(const iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 1;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 0;
-                        return now!=rhs.now;
-                    }
-                    bool operator!=(const const_iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 1;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 0;
-                        return now!=rhs.now;
-                    }
-            };
-            class const_iterator {
-                // it should has similar member method as iterator.
-                //  and it should be able to construct from an iterator.
-                friend class deque<T>;
-                private:
-                    const deque<T> *ptr;
-                    root *now_rt;
-                    node *now;
-                    int K_th(const int &sumsize) const
-                    {
-                        if (now_rt==ptr->Tail) return sumsize+1;
-                        int ret=0;
-                        root *x=ptr->Head->nxt;
-                        while (x!=now_rt)
-                        {
-                            ret+=x->size;
-                            x=x->nxt;
-                        }
-                        node *o=x->Head;
-                        while (o!=now)
-                        {
-                            ret++;
-                            o=o->nxt;
-                        }
-                        return ++ret;
-                    }
-                    // data members.
-                public:
-                    const_iterator() {}
-                    const_iterator(const deque<T> *_ptr,int K):ptr(_ptr)
-                    {
-                        now_rt=_ptr->Head->nxt; 
-                        while (now_rt!=_ptr->Tail&&K>now_rt->size)
-                        {
-                            K-=now_rt->size;
-                            now_rt=now_rt->nxt;
-                        }
-                        if (now_rt==_ptr->Tail) return;
-                        now=now_rt->Head,K--;
-                        while (K--) now=now->nxt;
-                    }
-                    const_iterator(const deque<T> *_ptr,root *_now_rt=NULL,node *_now=NULL):ptr(_ptr),now_rt(_now_rt),now(_now){}
-                    const_iterator(const const_iterator &other)
-                    {
-                        ptr=other.ptr;
-                        now_rt=other.now_rt;
-                        now=other.now;
-                    }
-                    const_iterator(const iterator &other)
-                    {
-                        ptr=other.ptr;
-                        now_rt=other.now_rt;
-                        now=other.now;
-                    }
-                    // And other methods in iterator.
-                    // And other methods in iterator.
-                    // And other methods in iterator.
-                    const_iterator operator+(const int &n) const 
-                    { 
-                        if (now_rt==ptr->Tail&&n>0)
-                            throw invalid_iterator();
-                        if (n<0) return this->operator-(-n);
-                        int K=n;
-                        const_iterator ret(ptr,now_rt,now);
-                        while (ret.now!=ret.now_rt->Tail&&K--) ret.now=ret.now->nxt;
-                        if (K<=0) return ret;
-                        ret.now_rt=ret.now_rt->nxt;
-                        while (ret.now_rt!=ret.ptr->Tail&&K>ret.now_rt->size) 
-                            K-=ret.now_rt->size,ret.now_rt=ret.now_rt->nxt;
-                        if (ret.now_rt==ret.ptr->Tail) return ret;
-                        ret.now=ret.now_rt->Head,K--;
-                        while (K--) ret.now=ret.now->nxt;
-                        return ret; 
-                    }
-                    const_iterator operator-(const int &n) const 
-                    {
-                        if (n<0) return this->operator+(-n);
-                        int K=n;
-                        const_iterator ret(ptr,now_rt,now);
-                        if (ret.now_rt!=ret.ptr->Tail)
-                            while (ret.now!=ret.now_rt->Head&&K--) ret.now=ret.now->pre;
-                        if (K<=0) return ret;
-                        ret.now_rt=ret.now_rt->pre;
-                        while (ret.now_rt!=ret.ptr->Head&&K>ret.now_rt->size) 
-                            K-=ret.now_rt->size,ret.now_rt=ret.now_rt->pre;
-                        if (ret.now_rt==ret.ptr->Head) 
-                            throw invalid_iterator();
-                        ret.now=ret.now_rt->Tail,K--;
-                        while (K--) ret.now=ret.now->pre;
-                        return ret; 
-                    }
-                    // return th distance between two iterator,
-                    // if these two iterators points to different vectors, throw invaild_iterator.
-                    int operator-(const const_iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr)
-                            throw invalid_iterator();
-                        return K_th(ptr->sumsize)-rhs.K_th(ptr->sumsize);
-                        
-                    }
-                    const_iterator& operator+=(const int &n) 
-                    {
-                        if (now_rt==ptr->Tail&&n>0)
-                            throw invalid_iterator();
-                        if (n<0) return this->operator-=(-n);
-                        int K=n;
-                        while (now!=now_rt->Tail&&K--) now=now->nxt;
-                        if (K<=0) return *this;
-                        now_rt=now_rt->nxt;
-                        while (now_rt!=ptr->Tail&&K>now_rt->size) 
-                            K-=now_rt->size,now_rt=now_rt->nxt;
-                        if (now_rt==ptr->Tail) return *this;
-                        now=now_rt->Head,K--;
-                        while (K--) now=now->nxt;
-                        return *this; 
-                    }
-                    const_iterator& operator-=(const int &n) 
-                    {
-                        if (n<0) return this->operator+=(-n);
-                        int K=n;
-                        if (now_rt!=ptr->Tail)
-                            while (now!=now_rt->Head&&K--) now=now->pre;
-                        if (K<=0) return *this;
-                        now_rt=now_rt->pre;
-                        while (now_rt!=ptr->Head&&K>now_rt->size) 
-                            K-=now_rt->size,now_rt=now_rt->pre;
-                        if (now_rt==ptr->Head) 
-                            throw invalid_iterator();
-                        now=now_rt->Tail,K--;
-                        while (K--) now=now->pre;
-                        return *this; 
-                    }
-                    /**
-                     * TODO iter++
-                     */
-                    const_iterator operator++(int) 
-                    {
-                        const_iterator tmp(*this);
-                        this->operator+(1);
-                        return tmp;
-                    }
-                    /**
-                     * TODO ++iter
-                     */
-                    const_iterator& operator++() 
-                    {
-                        this->operator+=(1);
-                        return *this;
-                    }
-                    /**
-                     * TODO iter--
-                     */
-                    const_iterator operator--(int) 
-                    {
-                        const_iterator tmp(*this);
-                        this->operator-(1);
-                        return tmp;
-                    }
-                    /**
-                     * TODO --iter
-                     */
-                    const_iterator& operator--() 
-                    {
-                        this->operator-=(1);
-                        return *this;
-                    }
-                    /**
-                     * TODO *it
-                     */
-                    const T& operator*() const 
-                    {
-                        if (now_rt==ptr->Tail) 
-                            throw invalid_iterator();
-                        return now->val;
-                    }
-                    /**
-                     * TODO it->field
-                     */
-                    const T* operator->() const noexcept 
-                    {
-                        return &(this->now->val);
-                    }
-                    /**
-                     * a operator to check whether two iterators are same (pointing to the same memory).
-                     */
-                    bool operator==(const iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 0;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 1;
-                        return now==rhs.now;
-                    }
-                    bool operator==(const const_iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 0;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 1;
-                        return now==rhs.now;
-                    }
-                    /**
-                     * some other operator for iterator.
-                     */
-                    bool operator!=(const iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 1;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 0;
-                        return now!=rhs.now;
-                    }
-                    bool operator!=(const const_iterator &rhs) const 
-                    {
-                        if (ptr!=rhs.ptr) return 1;
-                        if (now_rt==ptr->Tail&&rhs.now_rt==ptr->Tail) return 0;
-                        return now!=rhs.now;
-                    }
-            };
-            /**
-             * TODO Constructors
-             */
-            deque() 
+            iterator() : deque_ptr(nullptr), index(0) {}
+            iterator(deque<T> *deque_ptr, int k) : deque_ptr(deque_ptr), index(k) {}
+            iterator(const iterator &other)
             {
-                sumsize=blksize=0;
-                Head=new root,Tail=new root;
-                Head->nxt=Tail,Tail->pre=Head;
-            }
-            deque(const deque &other)                   //root:x rt node:o r
-            {
-                blksize=other.blksize;
-                sumsize=other.sumsize; 
-                Head=new root,Tail=new root;
-                Head->nxt=Tail,Tail->pre=Head;
-                root *x=Head;
-                for(root *rt=other.Head->nxt;rt!=other.Tail;rt=rt->nxt)
-                {
-                    x->nxt=new root(rt->size,x,Tail);
-                    x=x->nxt;
-                    node *r=rt->Head;
-                    x->Head=new node(r->val);
-                    node *o=x->Head;
-                    while (r!=rt->Tail)
-                    {
-                        r=r->nxt;
-                        o->nxt=new node(r->val);
-                        o->nxt->pre=o;
-                        o=o->nxt;
-                    }
-                    x->Tail=o;
-                }
-                Tail->pre=x;
+                deque_ptr = other.deque_ptr;
+                index = other.index;
             }
             /**
-             * TODO Deconstructor
+             * return a new iterator which pointer n-next elements
+             *   even if there are not enough elements, the behaviour is **undefined**.
+             * as well as operator-
              */
-            ~deque() 
+            iterator operator+(const int &n) const
             {
-                root *x=Head->nxt;
-                while (x!=Tail)
-                {
-                    node *o=x->Head;
-                    while (x->size--) o=del(o);
-                    x=del(x);
-                }
-                delete Head;
-                delete Tail;
+                return iterator(deque_ptr, index + n);
             }
-            /**
-             * TODO assignment operator
-             */
-            deque &operator=(const deque &other) 
+            iterator operator-(const int &n) const
             {
-                if (this!=&other)
-                {
-                    clear();
-                    blksize=other.blksize;
-                    sumsize=other.sumsize; 
-                    root *x=Head;
-                    for(root *rt=other.Head->nxt;rt!=other.Tail;rt=rt->nxt)
-                    {
-                        x->nxt=new root(rt->size,x,Tail);
-                        x=x->nxt;
-                        node *r=rt->Head;
-                        x->Head=new node(r->val);
-                        node *o=x->Head;
-                        while (r!=rt->Tail)
-                        {
-                            r=r->nxt;
-                            o->nxt=new node(r->val);
-                            o->nxt->pre=o;
-                            o=o->nxt;
-                        }
-                        x->Tail=o;
-                    }
-                    Tail->pre=x;
-                }
+                return iterator(deque_ptr, index - n);
+            }
+            // return th distance between two iterator,
+            // if these two iterators points to different vectors, throw invaild_iterator.
+            int operator-(const iterator &rhs) const
+            {
+                if (deque_ptr != rhs.deque_ptr)
+                    throw invalid_iterator();
+                return index - rhs.index;
+            }
+            iterator &operator+=(const int &n)
+            {
+                index += n;
+                return *this;
+            }
+            iterator &operator-=(const int &n)
+            {
+                index -= n;
                 return *this;
             }
             /**
-             * access specified element with bounds checking
-             * throw index_out_of_bound if out of bound.
+             * TODO iter++
              */
-            T & at(const size_t &pos) 
+            iterator operator++(int)
             {
-                if (pos<0||pos>=sumsize)
-                    throw index_out_of_bound();
-                int K=pos;
-                for(root *x=Head->nxt;x!=Tail;x=x->nxt)
-                {
-                    if (K<x->size)
-                    {
-                        node *o=x->Head;
-                        while (K--) o=o->nxt;
-                        return o->val;
-                    } 
-                    K-=x->size;
-                }
-            }
-            const T & at(const size_t &pos) const 
-            {
-                if (pos<0||pos>=sumsize)
-                    throw index_out_of_bound();
-                int K=pos;
-                for(root *x=Head->nxt;x!=Tail;x=x->nxt)
-                {
-                    if (K<x->size)
-                    {
-                        node *o=x->Head;
-                        while (K--) o=o->nxt;
-                        return o->val;
-                    } 
-                    K-=x->size;
-                }
-            }
-            T & operator[](const size_t &pos) 
-            {
-                return at(pos);
-            }
-            const T & operator[](const size_t &pos) const 
-            {
-                return at(pos);
+                iterator ret(*this);
+                index++;
+                return ret;
             }
             /**
-             * access the first element
-             * throw container_is_empty when the container is empty.
+             * TODO ++iter
              */
-            const T & front() const 
+            iterator &operator++()
             {
-                if (sumsize==0)
-                    throw container_is_empty();
-                return Head->nxt->Head->val;
+                index++;
+                return *this;
             }
             /**
-             * access the last element
-             * throw container_is_empty when the container is empty.
+             * TODO iter--
              */
-            const T & back() const 
+            iterator operator--(int)
             {
-                if (sumsize==0)
-                    throw container_is_empty();
-                return Tail->pre->Tail->val;
+                iterator ret(*this);
+                index--;
+                return ret;
             }
             /**
-             * returns an iterator to the beginning.
+             * TODO --iter
              */
-            iterator begin() 
+            iterator &operator--()
             {
-                return iterator(this,Head->nxt,Head->nxt->Head);
-            }
-            const_iterator cbegin() const 
-            {
-                return const_iterator(this,Head->nxt,Head->nxt->Head);
+                index--;
+                return *this;
             }
             /**
-             * returns an iterator to the end.
+             * TODO *it
              */
-            iterator end() 
+            T &operator*() const
             {
-                return iterator(this,Tail);
-            }
-            const_iterator cend() const 
-            {
-                return const_iterator(this,Tail);
+                return deque_ptr->at(index);
             }
             /**
-             * checks whether the container is empty.
+             * TODO it->field
              */
-            bool empty() const 
+            T *operator->() const noexcept
             {
-                return sumsize==0;
+                return &(deque_ptr->at(index));
             }
             /**
-             * returns the number of elements
+             * a operator to check whether two iterators are same (pointing to the same memory address).
              */
-            size_t size() const 
+            bool operator==(const iterator &rhs) const
             {
-                return sumsize;
+                return deque_ptr == rhs.deque_ptr && index == rhs.index;
+            }
+            bool operator==(const const_iterator &rhs) const
+            {
+                return deque_ptr == rhs.deque_ptr && index == rhs.index;
             }
             /**
-             * clears the contents
+             * some other operator for iterator.
              */
-            void clear() 
+            bool operator!=(const iterator &rhs) const
             {
-                root *x=Head->nxt;
-                while (x!=Tail)
-                {
-                    node *o=x->Head;
-                    while (x->size--) o=del(o);
-                    x=del(x);
-                }
-                sumsize=blksize=0;
-                Head->nxt=Tail;
-                Tail->pre=Head;       
+                return deque_ptr != rhs.deque_ptr || index != rhs.index;
             }
-            /**
-             * inserts elements at the specified locat on in the container.
-             * inserts value before pos
-             * returns an iterator pointing to the inserted value
-             *     throw if the iterator is invalid or it point to a wrong place.
-             */
-            iterator insert(iterator pos, const T &value) 
+            bool operator!=(const const_iterator &rhs) const
             {
-                if (pos.ptr!=this)
+                return deque_ptr != rhs.deque_ptr || index != rhs.index;
+            }
+        };
+        class const_iterator
+        {
+            // it should has similar member method as iterator.
+            //  and it should be able to construct from an iterator.
+            friend class deque<T>;
+
+        private:
+            const deque<T> *deque_ptr;
+            int index;
+            // data members.
+        public:
+            const_iterator() : deque_ptr(nullptr), index(0) {}
+            const_iterator(const deque<T> *deque_ptr, int k) : deque_ptr(deque_ptr), index(k) {}
+            const_iterator(const const_iterator &other)
+            {
+                deque_ptr = other.deque_ptr;
+                index = other.index;
+            }
+            const_iterator(const iterator &other)
+            {
+                deque_ptr = other.deque_ptr;
+                index = other.index;
+            }
+            // And other methods in iterator.
+            // And other methods in iterator.
+            // And other methods in iterator.
+            const_iterator operator+(const int &n) const
+            {
+                return const_iterator(deque_ptr, index + n);
+            }
+            const_iterator operator-(const int &n) const
+            {
+                return const_iterator(deque_ptr, index - n);
+            }
+            // return th distance between two iterator,
+            // if these two iterators points to different vectors, throw invaild_iterator.
+            int operator-(const const_iterator &rhs) const
+            {
+                if (deque_ptr != rhs.deque_ptr)
                     throw invalid_iterator();
-                if (pos.now_rt==Tail)
-                {
-                    push_back(value);
-                    return iterator(this,Tail->pre,Tail->pre->Tail);
-                }
-                int K=pos.K_th(sumsize);
-                blksize=std::sqrt(++sumsize);
-                if (pos.now==pos.now_rt->Head) 
-                {
-                    pos.now_rt->push_front(value,blksize);
-                    return iterator(this,K);
-                }
-                node *tmp=new node(value,pos.now->pre,pos.now);
-                pos.now->pre->nxt=tmp;
-                pos.now->pre=tmp;
-                pos.now_rt->size++;
-                pos.now_rt->split(blksize);
-                return iterator(this,K);
+                return index - rhs.index;
+            }
+            const_iterator &operator+=(const int &n)
+            {
+                index += n;
+                return *this;
+            }
+            const_iterator &operator-=(const int &n)
+            {
+                index -= n;
+                return *this;
             }
             /**
-             * removes specified element at pos.
-             * removes the element at pos.
-             * returns an iterator pointing to the following element, if pos pointing to the last element, end() will be returned.
-             * throw if the container is empty, the iterator is invalid or it points to a wrong place.
+             * TODO iter++
              */
-            iterator erase(iterator pos) 
+            const_iterator operator++(int)
             {
-                sumsize--;
-                if (pos.ptr!=this)
-                    throw invalid_iterator();
-                if (pos.now_rt==Head||pos.now_rt==Tail)
-                    throw invalid_iterator();
-                int K=pos.K_th(sumsize);
-                if (pos.now==pos.now_rt->Head) 
-                {
-                    pos.now_rt->pop_front(blksize);
-                    return iterator(this,K);
-                }
-                if (pos.now==pos.now_rt->Tail)
-                {
-                    pos.now_rt->pop_back(blksize);
-                    return iterator(this,K);
-                }
-                del(pos.now);
-                pos.now_rt->size--;
-                pos.now_rt->merge(blksize);
-                return iterator(this,K);
+                const_iterator ret(*this);
+                index++;
+                return ret;
             }
             /**
-             * adds an element to the end
+             * TODO ++iter
              */
-            void push_back(const T &value) 
+            const_iterator &operator++()
             {
-                blksize=std::sqrt(++sumsize);
-                root *x=Tail->pre;
-                if (x==Head)
+                index++;
+                return *this;
+            }
+            /**
+             * TODO iter--
+             */
+            const_iterator operator--(int)
+            {
+                const_iterator ret(*this);
+                index--;
+                return ret;
+            }
+            /**
+             * TODO --iter
+             */
+            const_iterator &operator--()
+            {
+                index--;
+                return *this;
+            }
+            /**
+             * TODO *it
+             */
+            const T &operator*() const
+            {
+                return deque_ptr->at(index);
+            }
+            /**
+             * TODO it->field
+             */
+            const T *operator->() const noexcept
+            {
+                return &(deque_ptr->at(index));
+            }
+            /**
+             * a operator to check whether two iterators are same (pointing to the same memory address).
+             */
+            bool operator==(const iterator &rhs) const
+            {
+                return deque_ptr == rhs.deque_ptr && index == rhs.index;
+            }
+            bool operator==(const const_iterator &rhs) const
+            {
+                return deque_ptr == rhs.deque_ptr && index == rhs.index;
+            }
+            /**
+             * some other operator for iterator.
+             */
+            bool operator!=(const iterator &rhs) const
+            {
+                return deque_ptr != rhs.deque_ptr || index != rhs.index;
+            }
+            bool operator!=(const const_iterator &rhs) const
+            {
+                return deque_ptr != rhs.deque_ptr || index != rhs.index;
+            }
+        };
+        /**
+         * TODO Constructors
+         */
+        deque()
+        {
+            total_size = 0;
+            blk_size = min_blk;
+            head = new Block();
+            tail = new Block();
+            head->succ = tail;
+            tail->prev = head;
+        }
+        deque(const deque &other)
+        {
+            blk_size = other.blk_size;
+            total_size = other.total_size;
+            head = new Block();
+            tail = new Block();
+            head->succ = tail;
+            tail->prev = head;
+
+            Block *current = head;
+            for (Block *t = other.head->succ; t != other.tail; t = t->succ)
+            {
+                // add Block
+                Block *x = new Block(*t);
+                current->succ->prev = x;
+                x->succ = current->succ;
+                x->prev = current;
+                current->succ = x;
+
+                current = x;
+            }
+        }
+        /**
+         * TODO Deconstructor
+         */
+        ~deque()
+        {
+            Block *x = head;
+            do
+            {
+                Block *succ = x->succ;
+                delete x;
+                x = succ;
+            } while (x != nullptr);
+        }
+        /**
+         * TODO assignment operator
+         */
+        deque &operator=(const deque &other)
+        {
+            if (this != &other)
+            {
+                clear();
+                blk_size = other.blk_size;
+                total_size = other.total_size;
+
+                Block *current = head;
+                for (Block *t = other.head->succ; t != other.tail; t = t->succ)
                 {
-                    x=new root(0,Head,Tail);
-                    Head->nxt=x;
-                    Tail->pre=x;
+                    // add Block
+                    Block *x = new Block(*t);
+                    current->succ->prev = x;
+                    x->succ = current->succ;
+                    x->prev = current;
+                    current->succ = x;
+
+                    current = x;
                 }
-                x->push_back(value,blksize);  
             }
-            /**
-             * removes the last element
-             *     throw when the container is empty.
-             */
-            void pop_back() 
+            return *this;
+        }
+        /**
+         * access specified element with bounds checking
+         * throw index_out_of_bound if out of bound.
+         */
+        T &at(const size_t &pos)
+        {
+            if (pos < 0 || pos >= total_size)
+                throw index_out_of_bound();
+            pair<Block *, Node *> result = find(pos);
+            return *(result.second->storage);
+        }
+        const T &at(const size_t &pos) const
+        {
+            if (pos < 0 || pos >= total_size)
+                throw index_out_of_bound();
+            pair<Block *, Node *> result = find(pos);
+            return *(result.second->storage);
+        }
+        T &operator[](const size_t &pos)
+        {
+            return at(pos);
+        }
+        const T &operator[](const size_t &pos) const
+        {
+            return at(pos);
+        }
+        /**
+         * access the first element
+         * throw container_is_empty when the container is empty.
+         */
+        const T &front() const
+        {
+            if (total_size == 0)
+                throw container_is_empty();
+            Block *x = head->succ;
+            return *(x->head->succ->storage);
+        }
+        /**
+         * access the last element
+         * throw container_is_empty when the container is empty.
+         */
+        const T &back() const
+        {
+            if (total_size == 0)
+                throw container_is_empty();
+            Block *x = tail->prev;
+            return *(x->tail->prev->storage);
+        }
+        /**
+         * returns an iterator to the beginning.
+         */
+        iterator begin()
+        {
+            return iterator(this, 0);
+        }
+        const_iterator cbegin() const
+        {
+            return const_iterator(this, 0);
+        }
+        /**
+         * returns an iterator to the end.
+         */
+        iterator end()
+        {
+            return iterator(this, total_size);
+        }
+        const_iterator cend() const
+        {
+            return const_iterator(this, total_size);
+        }
+        /**
+         * checks whether the container is empty.
+         */
+        bool empty() const
+        {
+            return total_size == 0;
+        }
+        /**
+         * returns the number of elements
+         */
+        size_t size() const
+        {
+            return total_size;
+        }
+        /**
+         * clears the contents
+         */
+        void clear()
+        {
+            Block *x = head;
+            do
             {
-                if (sumsize==0) 
-                    throw container_is_empty();
-                Tail->pre->pop_back(blksize);
-                sumsize--;
-            }
-            /**
-             * inserts an element to the beginning.
-             */
-            void push_front(const T &value) 
+                Block *succ = x->succ;
+                delete x;
+                x = succ;
+            } while (x != nullptr);
+
+            total_size = 0;
+            blk_size = min_blk;
+            head = new Block();
+            tail = new Block();
+            head->succ = tail;
+            tail->prev = head;
+        }
+        /**
+         * inserts elements at the specified locat on in the container.
+         * inserts value before pos
+         * returns an iterator pointing to the inserted value
+         *     throw if the iterator is invalid or it point to a wrong place.
+         */
+        iterator insert(iterator pos, const T &value)
+        {
+            if (pos.deque_ptr != this)
+                throw invalid_iterator();
+            if (pos.index < 0 || pos.index > total_size)
+                throw invalid_iterator();
+
+            if (pos.index == total_size)
             {
-                blksize=std::sqrt(++sumsize);
-                root *x=Head->nxt;
-                if (x==Tail)
-                {
-                    x=new root(0,Head,Tail);
-                    Head->nxt=x;
-                    Tail->pre=x;
-                }
-                x->push_front(value,blksize);
+                push_back(value);
+                return iterator(this, pos.index);
             }
-            /**
-             * removes the first element.
-             *     throw when the container is empty.
-             */
-            void pop_front() 
+            total_size++;
+            pair<Block *, Node *> result = find(pos.index);
+            result.first->insert(result.second, value, blk_size);
+            return iterator(this, pos.index);
+        }
+        /**
+         * removes specified element at pos.
+         * removes the element at pos.
+         * returns an iterator pointing to the following element, if pos pointing to the last element, end() will be returned.
+         * throw if the container is empty, the iterator is invalid or it points to a wrong place.
+         */
+        iterator erase(iterator pos)
+        {
+            if (pos.deque_ptr != this)
+                throw invalid_iterator();
+            if (pos.index < 0 || pos.index >= total_size)
+                throw invalid_iterator();
+
+            total_size--;
+            pair<Block *, Node *> result = find(pos.index);
+            result.first->remove(result.second, blk_size);
+            return iterator(this, pos.index);
+        }
+        /**
+         * adds an element to the end
+         */
+        void push_back(const T &value)
+        {
+            blk_size = std::max(
+                blk_size, (int)std::sqrt(++total_size));
+            Block *x = tail->prev;
+            if (x == head)
             {
-                if (sumsize==0)
-                    throw container_is_empty();
-                Head->nxt->pop_front(blksize);
-                sumsize--;
+                x = new Block(head, tail);
+                head->succ = x;
+                tail->prev = x;
             }
+            x->insert(x->tail, value, blk_size);
+        }
+        /**
+         * removes the last element
+         *     throw when the container is empty.
+         */
+        void pop_back()
+        {
+            if (total_size == 0)
+                throw container_is_empty();
+            Block *x = tail->prev;
+            x->remove(x->tail->prev, blk_size);
+            total_size--;
+        }
+        /**
+         * inserts an element to the beginning.
+         */
+        void push_front(const T &value)
+        {
+            blk_size = std::max(
+                blk_size, (int)std::sqrt(++total_size));
+            Block *x = head->succ;
+            if (x == tail)
+            {
+                x = new Block(head, tail);
+                head->succ = x;
+                tail->prev = x;
+            }
+            x->insert(x->head->succ, value, blk_size);
+        }
+        /**
+         * removes the first element.
+         *     throw when the container is empty.
+         */
+        void pop_front()
+        {
+            if (total_size == 0)
+                throw container_is_empty();
+            Block *x = head->succ;
+            x->remove(x->head->succ, blk_size);
+            total_size--;
+        }
     };
 
 }
