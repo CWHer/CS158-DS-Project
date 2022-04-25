@@ -1,617 +1,790 @@
 #include <functional>
 #include <cstddef>
+#include <cstring>
 #include "exception.hpp"
 #include "utility.hpp"
-#include <cstring>
-namespace sjtu 
+
+namespace sjtu
 {
     template <class Key, class Value>
-    class BTree {
+    class BTree
+    {
     private:
-        static const int blocksize=4096;
-        // static const int datasize=40;
-        static const int datasize=4000;
-        const int maxL,maxM;
+        static const int BLOCK_SIZE = 1 << 12;
+
         FILE *file;
-        char filename[200];
-        int cnt,rt;
-        // Your private members go here
-        struct node
+        char file_path[200];
+
+        enum NodeType
         {
-            int pos;
-            int pre,nxt;
-            bool isleaf;
-            char data[4050];
-            int sizeM,sizeL;    
-            //sizeM=num(key)=num(ch)+1  (key,ch)  
-            //sizeL=num(key)    (key,value)
-            node()
+            Internal,
+            Leaf,
+            None,
+        };
+        // Your private members go here
+        struct Node
+        {
+            static const int DATA_SIZE = 4000;
+            static constexpr int MAX_M =
+                DATA_SIZE / (sizeof(Key) + sizeof(int)) - 1;
+            static const int MAX_L =
+                DATA_SIZE / (sizeof(Key) + sizeof(Value)) - 1;
+            // NOTE:
+            //  MAX_M: max n_child in internal node
+            //      (MAX_M - 1) / 2 <= n_key < MAX_M
+            //  MAX_L: max n_key in leaf node
+            //      (MAX_L + 1) / 2 <= n_key <= MAX_L
+
+            int byte_offset;
+            // >>>>> store in disk
+            int prev_offset, succ_offset; // for sequential read
+            NodeType node_type;
+            int n_key;
+            // NOTE: for Internal node
+            //  1. n_child = n_key + 1
+            //  2. child[k] <= key[k] < child[k + 1]
+            //     "==" holds for some keys in child[k]
+            char storage[DATA_SIZE];
+            // <<<<< store in disk
+
+        public:
+            Node() { node_type = NodeType::None; }
+
+            Node(NodeType node_type, int offset)
             {
-                pos=1;
-                pre=nxt=-1;
-                isleaf=1;
-                sizeM=sizeL=0;
-                memset(data,0,sizeof(data));
+                byte_offset = offset;
+                prev_offset = succ_offset = -1;
+                this->node_type = node_type;
+                n_key = 0;
             }
-            Key &key(int k) {return *(Key*)(data+k*sizeof(Key));}
-            Value &value(int k,int maxL) {return *(Value*)(data+(maxL+1)*sizeof(Key)+k*sizeof(Value));}
-            int &ch(int k,int maxM) {return *(int*)(data+(maxM+1)*sizeof(Key)+k*sizeof(int));}
-            void insert_val(int k,Key _key,Value _value,int maxL)
+
+            Node(FILE *file, int offset) { load(file, offset); }
+
+            bool isOverflow()
             {
-                ++sizeL;
-                for(int i=sizeL-1;i>k;--i)
-                {
-                    key(i)=key(i-1);
-                    value(i,maxL)=value(i-1,maxL);
-                }
-                key(k)=_key,value(k,maxL)=_value;
+                return (node_type == NodeType::Leaf && n_key > MAX_L) ||
+                       (node_type == NodeType::Internal && n_key >= MAX_M);
             }
-            void insert_ch(int k,Key _key,int _pos,int maxM) //key:k,ch:k+1
+
+            bool isUnderflow()
             {
-                ++sizeM;
-                for(int i=sizeM-1;i>k;--i)
-                {
-                    key(i)=key(i-1);
-                    ch(i+1,maxM)=ch(i,maxM);
-                }
-                key(k)=_key,ch(k+1,maxM)=_pos;
+                return (node_type == NodeType::Leaf && n_key < (MAX_L + 1) >> 1) ||
+                       (node_type == NodeType::Internal && n_key < (MAX_M - 1) >> 1);
             }
-            void erase_val(int k,int maxL)
+
+            // load from file
+            void load(FILE *file, int offset)
             {
-                --sizeL;
-                for(int i=k;i<sizeL;++i)
-                {
-                    key(i)=key(i+1);
-                    value(i,maxL)=value(i+1,maxL);
-                }
+                byte_offset = offset;
+                fseek(file, offset, SEEK_SET);
+
+                fread(&prev_offset, sizeof(int), 1, file);
+                fread(&succ_offset, sizeof(int), 1, file);
+                fread(&node_type, sizeof(NodeType), 1, file);
+                fread(&n_key, sizeof(int), 1, file);
+                fread(&storage, sizeof(char), DATA_SIZE, file);
             }
-            void erase_ch(int k,int maxM)   //key:k,ch:k+1
+
+            // save to file
+            void save(FILE *file)
             {
-                --sizeM;
-                for(int i=k;i<sizeM;++i)
+                fseek(file, byte_offset, SEEK_SET);
+
+                fwrite(&prev_offset, sizeof(int), 1, file);
+                fwrite(&succ_offset, sizeof(int), 1, file);
+                fwrite(&node_type, sizeof(NodeType), 1, file);
+                fwrite(&n_key, sizeof(int), 1, file);
+                fwrite(&storage, sizeof(char), DATA_SIZE, file);
+            }
+
+            Key &key(int k)
+            {
+                return *(Key *)(storage + k * sizeof(Key));
+            }
+            int &child(int k)
+            {
+                if (node_type != NodeType::Internal)
+                    throw runtime_error();
+                return *(int *)(storage +
+                                (MAX_M + 1) * sizeof(Key) +
+                                k * sizeof(int));
+            }
+            Value &value(int k)
+            {
+                if (node_type != NodeType::Leaf)
+                    throw runtime_error();
+                return *(Value *)(storage +
+                                  (MAX_L + 1) * sizeof(Key) +
+                                  k * sizeof(Value));
+            }
+
+            // returns: k
+            //  key[k - 1] < target_key <= key[k]
+            int find(const Key &target_key)
+            {
+                int k = 0;
+                while (k < n_key && target_key > key(k))
+                    k++;
+                return k;
+            }
+
+            // insert key to key[k] and child to child[k + b]
+            // NOTE: "b" is either 0 or 1
+            void insertChild(
+                int k, int b, Key new_key, int child_offset)
+            {
+                child(n_key + 1) = child(n_key);
+                for (int i = n_key; i > k; --i)
                 {
-                    key(i)=key(i+1);
-                    ch(i+1,maxM)=ch(i+2,maxM);
+                    key(i) = key(i - 1);
+                    child(i + b) = child(i - 1 + b);
                 }
+                n_key++;
+                key(k) = new_key;
+                child(k + b) = child_offset;
+            }
+
+            // insert key to key[k] and value to value[k]
+            void insertData(
+                int k, Key new_key, Value new_value)
+            {
+                for (int i = n_key; i > k; --i)
+                {
+                    key(i) = key(i - 1);
+                    value(i) = value(i - 1);
+                }
+                n_key++;
+                key(k) = new_key;
+                value(k) = new_value;
+            }
+
+            //  remove key[k] and child[k] / value[k]
+            void remove(int k)
+            {
+                for (int i = k; i < n_key; ++i)
+                {
+                    key(i) = key(i + 1);
+                    node_type == NodeType::Leaf
+                        ? value(i) = value(i + 1)
+                        : child(i) = child(i + 1);
+                }
+                n_key--;
             }
         };
-        //for insert
-        node prev;  //additional node 
-        Key lastkey;    //for insert, last key from ch/for erase, mininum in erase leaf
-        Key prekey;     //for erase, when move but not merge
-        void split_node(node &x,node &t)
+
+        // >>>>> store in disk
+        int current_offset;
+        int root_offset;
+        int seq_head, seq_tail;
+        // <<<<< store in disk
+
+    private:
+        // lower_bound
+        // returns: <is_found, <byte_offset, k>>
+        pair<bool, pair<int, int>> find(
+            int root_offset, const Key &key)
         {
-            if (t.isleaf) 
+            Node x(file, root_offset);
+            while (x.node_type != NodeType::Leaf)
             {
-                for(int i=0;i<t.sizeL;++i)
+                int k = x.find(key);
+                x.load(file, x.child(k));
+            }
+            int k = x.find(key);
+            // if k == x.n_key, this must be end()
+            return pair<bool, pair<int, int>>(
+                k != x.n_key && x.key(k) == key, pair<int, int>(x.byte_offset, k));
+        }
+
+        // >>>>> insert
+
+        // split x into x & x->succ
+        //  returns: <new_key, succ_offset>
+        //  may change seq_tail
+        pair<Key, int> split(Node &x)
+        {
+            Node succ(x.node_type,
+                      current_offset += BLOCK_SIZE);
+
+            if (x.node_type == NodeType::Leaf)
+            {
+                // link sequential node
+                succ.prev_offset = x.byte_offset;
+                succ.succ_offset = x.succ_offset;
+                if (x.succ_offset != -1)
                 {
-                    t.value(i,maxL)=x.value(i+x.sizeL,maxL);
-                    t.key(i)=x.key(i+x.sizeL);  
+                    Node t(file, x.succ_offset);
+                    t.prev_offset = succ.byte_offset;
+                    t.save(file);
                 }
+                x.succ_offset = succ.byte_offset;
+                if (succ.succ_offset == -1)
+                    seq_tail = succ.byte_offset;
+
+                x.n_key = (Node::MAX_L + 1) >> 1;
+                succ.n_key = Node::MAX_L + 1 - x.n_key;
+                for (int i = 0; i < succ.n_key; ++i)
+                {
+                    succ.key(i) = x.key(x.n_key + i);
+                    succ.value(i) = x.value(x.n_key + i);
+                }
+                x.save(file), succ.save(file);
+                return pair<Key, int>(
+                    x.key(x.n_key - 1), succ.byte_offset);
             }
             else
             {
-                for(int i=0;i<t.sizeM;++i)
+                x.n_key = (Node::MAX_M - 1) >> 1;
+                succ.n_key = Node::MAX_M - x.n_key - 1;
+                for (int i = 0; i < succ.n_key; ++i)
                 {
-                    t.key(i)=x.key(i+x.sizeM+1);  
-                    t.ch(i,maxM)=x.ch(i+x.sizeM+1,maxM);  
+                    succ.key(i) = x.key(x.n_key + 1 + i);
+                    succ.child(i) = x.child(x.n_key + 1 + i);
                 }
-                t.ch(t.sizeM,maxM)=x.ch(t.sizeM+x.sizeM+1,maxM);
+                succ.child(succ.n_key) = x.child(Node::MAX_M);
+                x.save(file), succ.save(file);
+                return pair<Key, int>(
+                    x.key(x.n_key), succ.byte_offset);
             }
         }
-        void split(node &x,node &t)     //x>>t  
+
+        // find() + solveOverflow() requires 2x read + 1x write
+        //  However, recursive insert() only need 1x read + 1x write
+        // returns: <key_not_found, <new_key, succ_offset>>
+        pair<bool, pair<Key, int>> insert(
+            int offset, const Key &key, const Value &value)
         {
-            t.isleaf=x.isleaf;
-            t.sizeM=t.sizeL=0;
-            t.pos=++cnt;
-            t.pre=x.pos,t.nxt=x.nxt;
-            if (x.nxt!=-1)
+            // NOTE: root is NOT handled.
+            Node x(file, offset);
+
+            if (x.node_type == NodeType::Leaf)
             {
-                node to;
-                read_node(to,x.nxt);
-                to.pre=cnt,write_node(to);
-            }
-            x.nxt=cnt;
-            if (x.isleaf)
-                t.sizeL=x.sizeL=(maxL+1)>>1;
-            else 
-                t.sizeM=x.sizeM=maxM/2;
-            split_node(x,t);
-        }
-        void merge_node(node &x,node &t)
-        {
-            if (t.isleaf) 
-            {
-                for(int i=0;i<t.sizeL;++i)
+                int k = x.find(key);
+                if (k != x.n_key && x.key(k) == key)
+                    return pair<bool, pair<Key, int>>(
+                        false, pair<Key, int>(key, -1));
+
+                x.insertData(k, key, value);
+                if (!x.isOverflow())
                 {
-                    x.value(x.sizeL+i,maxL)=t.value(i,maxL);
-                    x.key(x.sizeL+i)=t.key(i);  
+                    x.save(file);
+                    return pair<bool, pair<Key, int>>(
+                        true, pair<Key, int>(key, -1));
                 }
+                return pair<bool, pair<Key, int>>(true, split(x));
             }
-            else
+
+            int k = x.find(key);
+            pair<bool, pair<int, Key>>
+                result = insert(x.child(k), key, value);
+            if (!result.first ||
+                result.second.second == -1)
+                return result;
+
+            x.insertChild(
+                k, 1, result.second.first,
+                result.second.second);
+            if (!x.isOverflow())
             {
-                node to;
-                read_node(to,t.ch(0,maxM));
-                x.key(x.sizeM)=find_min(to);
-                for(int i=0;i<t.sizeM;++i)
+                x.save(file);
+                return pair<bool, pair<Key, int>>(
+                    true, pair<Key, int>(key, -1));
+            }
+            return pair<bool, pair<Key, int>>(true, split(x));
+        }
+        // <<<<< insert
+
+        // >>>>> remove
+        // rotate from left/right brother
+        bool rotate(Node &x, int k,
+                    Node &child, Node &left, Node &right)
+        {
+            if (left.node_type != NodeType::None)
+            {
+                left.n_key--;
+                if (!left.isUnderflow())
                 {
-                    x.key(x.sizeM+i+1)=t.key(i);
-                    x.ch(x.sizeM+i+1,maxM)=t.ch(i,maxM);
-                }
-                x.ch(x.sizeM+t.sizeM+1,maxM)=t.ch(t.sizeM,maxM);
-            }
-        }
-        void merge(node &x,node &t)     //x<<t
-        {
-            merge_node(x,t);
-            x.nxt=t.nxt;
-            if (x.nxt!=-1)
-            {
-                node to;
-                read_node(to,x.nxt);
-                to.pre=x.pos,write_node(to);
-            }
-            if (x.isleaf)
-                x.sizeL+=t.sizeL;
-            else 
-                x.sizeM+=t.sizeM+1;
-        }
-        Key find_min(node x)
-        {
-            while (!x.isleaf)
-                read_node(x,x.ch(0,maxM));
-            return x.key(0);
-        }
-        void write_node(node &x)
-        {
-            int k=x.pos;
-            fseek(file,k*blocksize,SEEK_SET);
-            fwrite(&x.pre,sizeof(int),1,file);
-            fwrite(&x.nxt,sizeof(int),1,file);
-            fwrite(&x.isleaf,sizeof(bool),1,file);
-            fwrite(&x.sizeL,sizeof(int),1,file);
-            fwrite(&x.sizeM,sizeof(int),1,file);
-            if (x.isleaf)
-                fwrite(x.data,1,sizeof(Key)*(maxL+1)+sizeof(Value)*(maxL+1),file);
-            else
-                fwrite(x.data,1,sizeof(Key)*(maxM+1)+sizeof(int)*(maxM+1),file);
-            
-        }
-        void read_node(node &x,int k)
-        {
-            x.pos=k;
-            fseek(file,k*blocksize,SEEK_SET);
-            fread(&x.pre,sizeof(int),1,file);
-            fread(&x.nxt,sizeof(int),1,file);
-            fread(&x.isleaf,sizeof(bool),1,file);
-            fread(&x.sizeL,sizeof(int),1,file);
-            fread(&x.sizeM,sizeof(int),1,file);
-            memset(x.data,0,sizeof(x.data));
-            if (x.isleaf)
-                fread(x.data,1,sizeof(Key)*(maxL+1)+sizeof(Value)*(maxL+1),file);
-            else
-                fread(x.data,1,sizeof(Key)*(maxM+1)+sizeof(int)*(maxM+1),file);
-        }
-        pair<bool,pair<int,int>> find(int rt,const Key &key)
-        {
-            node x;
-            read_node(x,rt);
-            while (!x.isleaf)
-            {
-                int to=0;
-                while (to<x.sizeM&&key>=x.key(to)) to++;
-                read_node(x,x.ch(to,maxM));
-            }
-            int k=0;
-            while (k<x.sizeL&&key>x.key(k)) k++;
-            pair<int,int> ret(x.pos,k);
-            if (k==x.sizeL||x.key(k)!=key) 
-                return pair<bool,pair<int,int>> (0,ret);
-            return pair<bool,pair<int,int>> (1,ret);
-        }
-        pair<bool,bool> insert(int pos,const Key &key, const Value &value) 
-        {
-            node x;
-            read_node(x,pos);
-            if (x.isleaf)
-            {
-                int k=0;
-                while (k<x.sizeL&&key>x.key(k)) k++;
-                if (k<x.sizeL&&x.key(k)==key) return pair<bool,bool>(0,0);
-                x.insert_val(k,key,value,maxL);
-                if (x.sizeL<=maxL)
-                {
-                    write_node(x);
-                    return pair<bool,bool>(1,0);
-                }
-                split(x,prev);
-                lastkey=prev.key(0);
-                write_node(x),write_node(prev);
-                return pair<bool,bool>(1,1);
-            }
-            int to=0;
-            while (to<x.sizeM&&key>=x.key(to)) to++;
-            pair<bool,bool> ret=insert(x.ch(to,maxM),key,value); 
-            if (!ret.first||!ret.second) return ret;
-            x.insert_ch(to,lastkey,prev.pos,maxM);
-            if (x.sizeM<=maxM)
-            {
-                write_node(x);
-                return pair<bool,bool>(1,0);
-            }
-            lastkey=x.key(maxM>>1);
-            split(x,prev);
-            write_node(x),write_node(prev);
-            return pair<bool,bool>(1,1);
-        }
-        pair<bool,pair<int,int>> erase(int pos,bool _end,const Key &key)  //-1:none // 0:move l:1,r:0 // 1:merge lmerge:1 rmerge:0 
-        {
-            node x;
-            read_node(x,pos);
-            if (x.isleaf)
-            {
-                int k=0;
-                while (k<x.sizeL&&key>x.key(k)) k++;
-                if (k>=x.sizeL||x.key(k)!=key) return pair<bool,pair<int,int>> (0,pair<int,int>(-1,0));
-                x.erase_val(k,maxL);
-                lastkey=x.key(0);
-                if (pos==rt||x.sizeL>=(maxL+1)/2)
-                {
-                    write_node(x);
-                    return pair<bool,pair<int,int>> (1,pair<int,int>(-1,0));
-                }
-                if (!_end)
-                {
-                    node t;
-                    read_node(t,x.nxt);
-                    if (t.sizeL>(maxL+1)/2)
+                    if (child.node_type == NodeType::Leaf)
                     {
-                        x.insert_val(x.sizeL,t.key(0),t.value(0,maxL),maxL);
-                        t.erase_val(0,maxL);
-                        write_node(x),write_node(t);
-                        prekey=t.key(0);
-                        return pair<bool,pair<int,int>> (1,pair<int,int>(0,0));
+                        child.insertData(
+                            0, left.key(left.n_key), left.value(left.n_key));
+                        x.key(k - 1) = left.key(left.n_key - 1);
                     }
-                    merge(x,t);
-                    write_node(x);
-                    return pair<bool,pair<int,int>> (1,pair<int,int>(1,0));
+                    else
+                    {
+                        child.insertChild(
+                            0, 0, x.key(k - 1), left.child(left.n_key + 1));
+                        x.key(k - 1) = left.key(left.n_key);
+                    }
+                    left.save(file);
+                    child.save(file);
+                    return true;
+                }
+
+                left.n_key++;
+            }
+
+            if (right.node_type != NodeType::None)
+            {
+                right.n_key--;
+                if (!right.isUnderflow())
+                {
+                    if (child.node_type == NodeType::Leaf)
+                    {
+                        child.insertData(
+                            child.n_key, right.key(0), right.value(0));
+                        x.key(k) = child.key(child.n_key - 1);
+                        right.n_key++, right.remove(0);
+                    }
+                    else
+                    {
+                        child.insertChild(
+                            child.n_key, 1, x.key(k), right.child(0));
+                        x.key(k) = right.key(0);
+                        right.n_key++, right.remove(0);
+                    }
+                    right.save(file);
+                    child.save(file);
+                    return true;
+                }
+
+                right.n_key++;
+            }
+
+            return false;
+        }
+
+        // merge from left/right brother
+        void merge(Node &x, int k,
+                   Node &child, Node &left, Node &right)
+        {
+            if (left.node_type != NodeType::None)
+            {
+                // merge to left
+                if (child.node_type == NodeType::Leaf)
+                {
+                    left.succ_offset = child.succ_offset;
+                    if (left.succ_offset != -1)
+                    {
+                        // NOTE: succ is not always right
+                        Node t(file, left.succ_offset);
+                        t.prev_offset = left.byte_offset;
+                        t.save(file);
+                    }
+                    if (left.succ_offset == -1)
+                        seq_tail = left.byte_offset;
+
+                    for (int i = 0; i < child.n_key; ++i)
+                        left.insertData(left.n_key, child.key(i), child.value(i));
+                    x.key(k - 1) = left.key(left.n_key - 1);
+                    x.remove(k);
                 }
                 else
                 {
-                    node t;
-                    read_node(t,x.pre);
-                    if (t.sizeL>(maxL+1)/2)
+                    for (int i = 0; i <= child.n_key; ++i)
+                        left.insertChild(left.n_key, 1,
+                                         i == 0
+                                             ? x.key(k - 1)
+                                             : child.key(i - 1),
+                                         child.child(i));
+                    x.key(k - 1) = x.key(k);
+                    x.remove(k);
+                }
+                left.save(file);
+                return;
+            }
+
+            if (right.node_type != NodeType::None)
+            {
+                // merge to right
+                if (child.node_type == NodeType::Leaf)
+                {
+                    right.prev_offset = child.prev_offset;
+                    if (right.prev_offset != -1)
                     {
-                        x.insert_val(0,t.key(t.sizeL-1),t.value(t.sizeL-1,maxL),maxL);
-                        t.erase_val(t.sizeL-1,maxL);
-                        write_node(x),write_node(t);
-                        prekey=x.key(0);
-                        return pair<bool,pair<int,int>> (1,pair<int,int>(0,1));
+                        // NOTE: prev is not always left
+                        Node t(file, right.prev_offset);
+                        t.succ_offset = right.byte_offset;
+                        t.save(file);
                     }
-                    merge(t,x);
-                    write_node(t);
-                    return pair<bool,pair<int,int>> (1,pair<int,int>(1,1));
-                }
-            }
-            int to=0;
-            while (to<x.sizeM&&key>=x.key(to)) to++;
-            pair<bool,pair<int,int>> ret=erase(x.ch(to,maxM),to==x.sizeM,key);
-            if (!ret.first) return ret;
-            if (to>0&&x.key(to-1)==key) x.key(to-1)=lastkey;
-            if (ret.second.first==-1) {write_node(x);return ret;}
-            if (ret.second.first==0)
-            {
-                x.key(to-ret.second.second)=prekey;
-                write_node(x);
-                return pair<bool,pair<int,int>> (1,pair<int,int>(-1,0));
-            }
-            x.erase_ch(to-ret.second.second,maxM);
-            if (x.sizeM>=maxM/2)
-            {
-                write_node(x);
-                return pair<bool,pair<int,int>> (1,pair<int,int>(-1,0));
-            }
-            if (!_end)
-            {
-                node t;
-                read_node(t,x.nxt);
-                if (t.sizeM>maxM/2)
-                {
-                    node to;
-                    read_node(to,t.ch(0,maxM));
-                    x.insert_ch(x.sizeM,find_min(to),to.pos,maxM);
-                    prekey=t.key(0);
-                    t.ch(0,maxM)=t.ch(1,maxM),t.erase_ch(0,maxM);
-                    write_node(x),write_node(t);
-                    return pair<bool,pair<int,int>> (1,pair<int,int>(0,0));
-                }
-                merge(x,t);
-                write_node(x);
-                return pair<bool,pair<int,int>> (1,pair<int,int>(1,0));
-            }
-            else
-            {
-                node t;
-                read_node(t,x.pre);
-                if (t.sizeM>maxM/2)
-                {
-                    node to;
-                    read_node(to,x.ch(0,maxM));
-                    x.insert_ch(0,find_min(to),x.ch(0,maxM),maxM);
-                    x.ch(0,maxM)=t.ch(t.sizeM,maxM);
+                    if (right.prev_offset == -1)
+                        seq_head = right.byte_offset;
 
-                    prekey=t.key(t.sizeM-1);
-                    t.erase_ch(t.sizeM-1,maxM);
-                    write_node(x),write_node(t);
-                    return pair<bool,pair<int,int>> (1,pair<int,int>(0,1));
+                    for (int i = child.n_key - 1; i >= 0; --i)
+                        right.insertData(0, child.key(i), child.value(i));
+                    x.remove(k);
                 }
-                merge(t,x);
-                write_node(t);
-                return pair<bool,pair<int,int>> (1,pair<int,int>(1,1));
+                else
+                {
+                    for (int i = child.n_key; i >= 0; --i)
+                        right.insertChild(0, 0,
+                                          i == child.n_key
+                                              ? x.key(k)
+                                              : child.key(i),
+                                          child.child(i));
+                    x.remove(k);
+                }
+                right.save(file);
+                return;
             }
         }
+
+        // returns: <key_found, <child_node, max_key>>
+        //  1. update
+        //      if max key is removed, key[k] may change
+        //      NOTE: max_key is not accurate if (key[k] != key)
+        //  2. rotate
+        //  3. merge
+        pair<bool, pair<Node, Key>> remove(int offset, const Key &key)
+        {
+            // NOTE: root is NOT handled.
+            Node x(file, offset);
+
+            if (x.node_type == NodeType::Leaf)
+            {
+                int k = x.find(key);
+                if (k == x.n_key || x.key(k) != key)
+                    return pair<bool, pair<Node, Key>>(
+                        false, pair<Node, Key>(x, key));
+
+                x.remove(k);
+                return pair<bool, pair<Node, Key>>(
+                    true, pair<Node, Key>(x, x.key(x.n_key - 1)));
+            }
+
+            int k = x.find(key);
+            pair<bool, pair<Node, Key>>
+                result = remove(x.child(k), key);
+            if (!result.first)
+                return result;
+
+            Node child = result.second.first;
+            Key max_key = result.second.second;
+            // >>>>> update
+            //  key[k] may be removed
+            if (k < x.n_key && x.key(k) == key)
+                x.key(k) = max_key;
+
+            // normal case
+            if (!child.isUnderflow())
+            {
+                child.save(file);
+                return pair<bool, pair<Node, Key>>(
+                    true, pair<Node, Key>(x, max_key));
+            }
+
+            // underflow
+            Node left, right;
+            if (k - 1 >= 0)
+                left.load(file, x.child(k - 1));
+            if (k + 1 <= x.n_key)
+                right.load(file, x.child(k + 1));
+            // >>>>> rotate / merge
+            if (!rotate(x, k, child, left, right))
+                merge(x, k, child, left, right);
+
+            return pair<bool, pair<Node, Key>>(
+                true, pair<Node, Key>(x, max_key));
+        }
+        // <<<<< remove
+
     public:
-        //to simplify, let maxM be even and let maxL be odd
-        //also let there be extra capacity with maxM/L 
-        BTree():maxM(((datasize/(sizeof(int)+sizeof(Key))-2)|1)^1),
-            maxL((datasize/(sizeof(Value)+sizeof(Key))-2)|1),
-            filename("b+_data")
+        // DEBUG function
+        void displayLeaf()
         {
-            file=fopen(filename,"rb+");
-            if (!file)
-            {
-                file=fopen(filename,"wb+");
-                node x;
-                cnt=rt=1,write_node(x);
-            }
-            else 
-            {
-                fseek(file,0,SEEK_SET);
-                fread(&rt,sizeof(int),1,file);
-                fread(&cnt,sizeof(int),1,file);
-            }
+            printf("[INFO]: ");
+            for (auto it = begin(); it != end(); ++it)
+                printf("%d ", it.getKey());
+            printf("\n");
         }
-        BTree(const char *fname):maxM(((datasize/(sizeof(int)+sizeof(Key))-2)|1)^1),
-            maxL((datasize/(sizeof(Value)+sizeof(Key))-2)|1)
+
+        void print(int tab, int key)
         {
-            filename=fname;
-            file=fopen(filename,"rb+");
-            if (!file)
-            {
-                file=fopen(filename,"wb+");
-                node x;
-                cnt=rt=1,write_node(x);
-            }
-            else 
-            {
-                fseek(file,0,SEEK_SET);
-                fread(&rt,sizeof(int),1,file);
-                fread(&cnt,sizeof(int),1,file);
-            }
+            while (tab--)
+                putchar('\t');
+            printf("%d\n", key);
         }
-        ~BTree() 
+
+        void displayAll(int offset = -1, int tab = 0)
         {
-            fseek(file,0,SEEK_SET);
-            fwrite(&rt,sizeof(int),1,file);
-            fwrite(&cnt,sizeof(int),1,file);
+            if (offset == -1)
+            {
+                offset = root_offset;
+                printf("[INFO]: \n");
+            }
+
+            Node x(file, offset);
+            if (x.node_type == NodeType::Leaf)
+            {
+                for (int i = 0; i < x.n_key; ++i)
+                    print(tab, x.key(i));
+                return;
+            }
+            for (int i = 0; i < x.n_key; ++i)
+            {
+                displayAll(x.child(i), tab + 1);
+                print(tab, x.key(i));
+            }
+            displayAll(x.child(x.n_key), tab + 1);
+        }
+
+    public:
+        BTree() : file_path("tree_data.bin")
+        {
+            file = fopen(file_path, "rb+");
+            if (file != nullptr)
+            {
+                fseek(file, 0, SEEK_SET);
+                fread(&current_offset, sizeof(int), 1, file);
+                fread(&root_offset, sizeof(int), 1, file);
+                fread(&seq_head, sizeof(int), 1, file);
+                fread(&seq_tail, sizeof(int), 1, file);
+                return;
+            }
+
+            file = fopen(file_path, "wb+");
+            current_offset = root_offset = BLOCK_SIZE;
+            seq_head = seq_tail = BLOCK_SIZE;
+            Node(NodeType::Leaf, root_offset).save(file);
+        }
+
+        BTree(const char *fname)
+        {
+            strcpy(file_path, fname);
+            file = fopen(file_path, "rb+");
+            if (file != nullptr)
+            {
+                fseek(file, 0, SEEK_SET);
+                fread(&current_offset, sizeof(int), 1, file);
+                fread(&root_offset, sizeof(int), 1, file);
+                fread(&seq_head, sizeof(int), 1, file);
+                fread(&seq_tail, sizeof(int), 1, file);
+                return;
+            }
+
+            file = fopen(file_path, "wb+");
+            current_offset = root_offset = BLOCK_SIZE;
+            seq_head = seq_tail = BLOCK_SIZE;
+            Node(NodeType::Leaf, root_offset).save(file);
+        }
+
+        ~BTree()
+        {
+            fseek(file, 0, SEEK_SET);
+            fwrite(&current_offset, sizeof(int), 1, file);
+            fwrite(&root_offset, sizeof(int), 1, file);
+            fwrite(&seq_head, sizeof(int), 1, file);
+            fwrite(&seq_tail, sizeof(int), 1, file);
+
             fclose(file);
         }
+
         // Clear the BTree
-        void clear() 
+        void clear()
         {
             fclose(file);
-            file=fopen(filename,"wb+");
-            node x;
-            cnt=rt=1;
-            write_node(x);
-        }
-        bool insert(const Key &key, const Value &value) 
-        {
-
-            pair<bool,bool> ret=insert(rt,key,value);
-            if (ret.second)
-            {
-                node x;
-                x.isleaf=0,x.pos=++cnt;
-                x.sizeM=1;
-                x.key(0)=lastkey;
-                x.ch(0,maxM)=rt,x.ch(1,maxM)=prev.pos;
-                rt=x.pos,write_node(x);
-            }
-            return ret.first;
-        }
-        bool modify(const Key &key, const Value &value) 
-        {
-            pair<bool,pair<int,int>> ret=find(rt,key);
-            if (!ret.first) return 0;
-            node x;
-            read_node(x,ret.second.first);
-            x.value(ret.second.second,maxL)=value;
-            write(x);
-            return 1;
-        }
-        Value at(const Key &key) 
-        {
-            pair<bool,pair<int,int>> ret=find(rt,key);
-            if (!ret.first) return Value();
-            node x;
-            read_node(x,ret.second.first);
-            return x.value(ret.second.second,maxL);
+            file = fopen(file_path, "wb+");
+            current_offset = root_offset = BLOCK_SIZE;
+            seq_head = seq_tail = BLOCK_SIZE;
+            Node(NodeType::Leaf, root_offset).save(file);
         }
 
-        bool erase(const Key &key) 
+        bool insert(const Key &key, const Value &value)
         {
-            node x;
-            read_node(x,rt);
-            if (x.isleaf) return erase(rt,0,key).first; 
-            int to=0;
-            while (to<x.sizeM&&key>=x.key(to)) to++;
-            pair<bool,pair<int,int>> ret=erase(x.ch(to,maxM),to==x.sizeM,key); 
-            if (!ret.first) return 0;
-            if (to>0&&x.key(to-1)==key) x.key(to-1)=lastkey;
-            if (ret.second.first==-1) {write_node(x);return 1;}
-            if (ret.second.first==0)
+            pair<bool, pair<Key, int>>
+                result = insert(root_offset, key, value);
+            if (result.second.second != -1)
             {
-                x.key(to-ret.second.second)=prekey;
-                write_node(x);
-                return 1;
+                // grow taller
+                Node x(NodeType::Internal,
+                       current_offset += BLOCK_SIZE);
+                x.n_key = 1;
+                x.key(0) = result.second.first;
+                x.child(0) = root_offset;
+                x.child(1) = result.second.second;
+                root_offset = x.byte_offset;
+                x.save(file);
             }
-            x.erase_ch(to-ret.second.second,maxM);
-            if (x.sizeM>0) {write_node(x);return 1;}
-            rt=x.ch(0,maxM);
-            return 1;
+            return result.first;
         }
-        
-        
-        class iterator 
+
+        bool modify(const Key &key, const Value &value)
+        {
+            pair<bool, pair<int, int>>
+                result = find(root_offset, key);
+            if (!result.first)
+                return false;
+            iterator it(this, result.second);
+            it.modify(value);
+            return true;
+        }
+
+        Value at(const Key &key)
+        {
+            pair<bool, pair<int, int>>
+                result = find(root_offset, key);
+            if (!result.first)
+                return Value();
+            iterator it(this, result.second);
+            return it.getValue();
+        }
+
+        bool erase(const Key &key)
+        {
+            pair<bool, pair<Node, Key>>
+                result = remove(root_offset, key);
+            if (result.first)
+            {
+                Node root = result.second.first;
+                if (root.n_key > 0)
+                    root.save(file);
+                if (root.n_key == 0 &&
+                    root.node_type == NodeType::Internal)
+                    root_offset = root.child(0);
+            }
+            return result.first;
+        }
+
+        class iterator
         {
             friend class BTree;
-            private:
-                // Your private members go here
-                BTree<Key, Value> *ptr;
-                int pos,K;  //in file/ in node
-            public:
-                iterator()
-                {
-                    ptr=NULL,pos=K=0;
-                }
-                iterator(BTree<Key, Value> *_ptr):ptr(_ptr)
-                {
-                    pos=K=0;
-                }
-                iterator(const iterator& other) 
-                {
-                    ptr=other.ptr;
-                    pos=other.pos;
-                    K=other.K;
-                }
 
-                // modify by iterator
-                bool modify(const Value& value) {
-                    node x;
-                    ptr->read_node(x,pos);
-                    x.value(K,ptr->maxL)=value;
-                    write(x);
-                    return 1;
-                }
+        private:
+            // Your private members go here
+            BTree<Key, Value> *tree_ptr;
+            int offset, k;
 
-                Key getKey() const 
-                {
-                    node x;
-                    ptr->read_node(x,pos);
-                    return x.key(K);
-                }
-
-                Value getValue() const 
-                {
-                    node x;
-                    ptr->read_node(x,pos);
-                    return x.value(K,ptr->maxL);
-                }
-
-                iterator operator++(int) 
-                {
-                    iterator ret(*this);
-                    node x;
-                    ptr->read_node(x,pos);
-                    if (++K>=x.sizeL&&x.nxt!=-1) K=0,pos=x.nxt;
-                    return ret;
-                }
-
-                iterator& operator++() 
-                {
-                    node x;
-                    ptr->read_node(x,pos);
-                    if (++K>=x.sizeL&&x.nxt!=-1) K=0,pos=x.nxt;
-                    return *this;
-                }
-                iterator operator--(int) 
-                {
-                    iterator ret(*this);
-                    node x;
-                    ptr->read_node(x,pos);
-                    if (--K<0) 
-                    {
-                        pos=x.pre;
-                        ptr->read_node(x,pos);
-                        K=x.sizeL-1;
-                    }
-                    return ret;
-                }
-
-                iterator& operator--() 
-                {
-                    node x;
-                    ptr->read_node(x,pos);
-                    if (--K<0) 
-                    {
-                        pos=x.pre;
-                        ptr->read_node(x,pos);
-                        K=x.sizeL-1;
-                    }
-                    return *this;   
-                }
-
-                // Overloaded of operator '==' and '!='
-                // Check whether the iterators are same
-                bool operator==(const iterator& rhs) const 
-                {
-                    if (ptr!=rhs.ptr) return 0;
-                    if (pos!=rhs.pos||K!=rhs.K) return 0;
-                    return 1; 
-                }
-
-                bool operator!=(const iterator& rhs) const 
-                {
-                    return !this->operator==(rhs);
-                }
-            };
-            
-            iterator begin() 
+        public:
+            iterator() : tree_ptr(nullptr), offset(-1), k(-1) {}
+            iterator(BTree<Key, Value> *tree_ptr, int offset, int k)
+                : tree_ptr(tree_ptr), offset(offset), k(k) {}
+            iterator(BTree<Key, Value> *tree_ptr, pair<int, int> loc)
+                : tree_ptr(tree_ptr), offset(loc.first), k(loc.second) {}
+            iterator(const iterator &other)
             {
-                node x;
-                read_node(x,rt);
-                while (!x.isleaf)
-                    read_node(x,x.ch(0,maxM));
-                iterator ret(this);
-                ret.pos=x.pos,ret.K=0;
-                return ret;
+                tree_ptr = other.tree_ptr;
+                offset = other.offset;
+                k = other.k;
             }
-            
-            // return an iterator to the end(the next element after the last)
-            iterator end() 
+
+            // modify by iterator
+            // HACK: cause UB if iterator is invalid
+            bool modify(const Value &value)
             {
-                node x;
-                read_node(x,rt);
-                while (!x.isleaf)
-                    read_node(x,x.ch(x.sizeM,maxM));
-                iterator ret(this);
-                ret.pos=x.pos,ret.K=x.sizeL;
+                Node x(tree_ptr->file, offset);
+                x.value(k) = value;
+                x.save(file);
+                return true;
+            }
+
+            Key getKey() const
+            {
+                Node x(tree_ptr->file, offset);
+                return x.key(k);
+            }
+
+            Value getValue() const
+            {
+                Node x(tree_ptr->file, offset);
+                return x.value(k);
+            }
+
+            iterator operator++(int)
+            {
+                if (*this == tree_ptr->end())
+                    throw invalid_iterator();
+
+                iterator ret(*this);
+                Node x(tree_ptr->file, offset);
+                if (++k >= x.n_key &&
+                    x.succ_offset != -1)
+                    k = 0, offset = x.succ_offset;
                 return ret;
             }
 
-            iterator find(const Key &key) 
+            iterator &operator++()
             {
-                pair<bool,pair<int,int>> pos=find(rt,key);
-                if (!pos.first) throw index_out_of_bound();
-                iterator ret(this);
-                ret.pos=pos.second.first;
-                ret.K=pos.second.second;
+                if (*this == tree_ptr->end())
+                    throw invalid_iterator();
+
+                Node x(tree_ptr->file, offset);
+                if (++k >= x.n_key &&
+                    x.succ_offset != -1)
+                    k = 0, offset = x.succ_offset;
+                return *this;
+            }
+
+            iterator operator--(int)
+            {
+                if (*this == tree_ptr->begin())
+                    throw invalid_iterator();
+
+                iterator ret(*this);
+                Node x(tree_ptr->file, offset);
+                if (--k < 0)
+                {
+                    offset = x.prev_offset;
+                    Node prev(tree_ptr->file, offset);
+                    k = x.n_key - 1;
+                }
                 return ret;
             }
-            
-            // return an iterator whose key is the smallest key greater or equal than 'key'
-            iterator lower_bound(const Key &key) 
+
+            iterator &operator--()
             {
-                pair<bool,pair<int,int>> pos=find(rt,key);
-                iterator ret(this);
-                ret.pos=pos.second.first;
-                ret.K=pos.second.second;
-                node x;
-                read_node(x,ret.pos);
-                if (ret.K==x.sizeL&&ret!=end()) ++ret;
-                while (ret!=end()&&ret.getKey()<key) ++ret;
-                return ret;    
+                if (*this == tree_ptr->begin())
+                    throw invalid_iterator();
+
+                Node x(tree_ptr->file, offset);
+                if (--k < 0)
+                {
+                    offset = x.prev_offset;
+                    Node prev(tree_ptr->file, offset);
+                    k = x.n_key - 1;
+                }
+                return *this;
+            }
+
+            // Overloaded of operator '==' and '!='
+            // Check whether the iterators are same
+            bool operator==(const iterator &rhs) const
+            {
+                return tree_ptr == rhs.tree_ptr &&
+                       offset == rhs.offset && k == rhs.k;
+            }
+
+            bool operator!=(const iterator &rhs) const
+            {
+                return !this->operator==(rhs);
             }
         };
-}  // namespace sjtu
+
+        iterator begin()
+        {
+            return iterator(this, seq_head, 0);
+        }
+
+        // return an iterator to the end(the next element after the last)
+        iterator end()
+        {
+            Node x(file, seq_tail);
+            return iterator(this, seq_tail, x.n_key);
+        }
+
+        iterator find(const Key &key)
+        {
+            pair<bool, pair<int, int>>
+                result = find(root_offset, key);
+            if (!result.first)
+                return end();
+            return iterator(this, result.second);
+        }
+
+        // return an iterator whose key is the smallest key greater or equal than 'key'
+        iterator lower_bound(const Key &key)
+        {
+            return iterator(this, find(root_offset, key).second);
+        }
+    };
+
+} // namespace sjtu
