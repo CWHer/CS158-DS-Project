@@ -3,9 +3,8 @@
 #include <cstdio>
 #include <vector>
 #include <map>
-#include <ctime>
 #include "BTree.hpp"
-// #include"BTree-yuri.hpp"
+
 using std::cin;
 using std::cout;
 using std::string;
@@ -15,7 +14,6 @@ using std::cerr;
 std::vector<int> v1;
 std::vector<long long> v2;
 const int n = 300000;
-// const int n=3000;
 
 long long aa = 13131, bb = 5353, MOD = (long long) (1e9 + 7), now = 1;
 
@@ -119,28 +117,14 @@ void test_erase() {
     printf("Test Erase.\n");
     sjtu::BTree<int, long long> tree;
     for (int i = 1; i < n / 2; ++i) {
-        // cout << i <<endl;
-        // if (i==59511)
-        // {
-        //     puts("");
-        // }
-        if (i==703)
-        {
-            puts("");
-        }
         tree.erase(v1[i]);
         if (tree.at(v1[i])) {
-            // cout<<i<<endl;
-            // tree.at(v1[i]);
             cerr << "erase error!" << endl;
             return;
         }
     }
     for (int i = n / 2; i <= n / 1.5; ++i) {
         if (tree.at(v1[i]) != v2[i]) {
-            // cout<<i<<endl;
-            // cout<<v1[i]<<' '<<v2[i]<<endl;
-            // tree.at(v1[i]);
             cerr << "erase error!" << endl;
             return;
         }
@@ -151,28 +135,19 @@ void test_erase() {
 
 
 int main() {
-    clock_t time_start=clock();
     int type;
-    // cin >> type;
+    cin >> type;
     make_vector();
-    test_clear();
-    test_insert();
-    test_query();
-    test_iterator();
-    test_erase();
-
-    // if (type == 1) {
-    //     test_clear();
-    //     test_insert();
-    // } else if (type == 2) {
-    //     test_query();
-    // } else if (type == 3) {
-    //  test_iterator();
-    // } else if (type == 4) {
-    //     test_erase();
-    // } else if (type == 5) {
-    //     // use for debug
-    // }
-    clock_t time_end=clock();
-    printf("Total time: %.2f ms", 1000*(time_end-time_start)/(double)CLOCKS_PER_SEC);
+    if (type == 1) {
+        test_clear();
+        test_insert();
+    } else if (type == 2) {
+        test_query();
+    } else if (type == 3) {
+        test_iterator();
+    } else if (type == 4) {
+        test_erase();
+    } else if (type == 5) {
+        // use for debug
+    }
 }
